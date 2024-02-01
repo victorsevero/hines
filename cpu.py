@@ -1,4 +1,4 @@
-import warnings
+from datetime import datetime
 
 import numpy as np
 
@@ -7,11 +7,11 @@ import numpy as np
 # https://medium.com/@guilospanck/the-journey-of-writing-a-nes-emulator-part-i-the-cpu-6e83b50baa37
 # https://www.copetti.org/writings/consoles/nes/
 # https://codeburst.io/how-do-processors-actually-work-91dce24fbb44
-# np.seterr(over="raise")
+np.seterr(over="ignore")
 
 
 class CPU:
-    def __init__(self):
+    def __init__(self, log=None):
         self.accumulator = Register()
         self.register_x = Register()
         self.register_y = Register()
@@ -21,10 +21,20 @@ class CPU:
         # self.data_bus = Bus(size=1)
         # self.address_bus = Bus(size=2)
         self.ram = RAM()
+        self.log = log is not None
+        if self.log:
+            self.log_file = open(
+                f"logs/{log}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+                "w",
+            )
 
     def main_loop(self):
         while True:
-            opcode = self.ram.read16(self.program_counter.read())
+            if self.log:
+                curr_pc = np.base_repr(self.program_counter.read(), 16)
+                curr_pc = "0" * (4 - len(curr_pc)) + curr_pc
+                self.log_file.write(f"{curr_pc}\n")
+            opcode = self.ram.read(self.program_counter.read())
             self.operation(opcode)
             self.program_counter.increment()
 
@@ -33,19 +43,63 @@ class CPU:
         self.register_x.write(0)
         self.register_y.write(0)
         self.status.reset()
-        self.program_counter = self.ram.read16(0xFFFC)
+        self.program_counter.write(self.ram.read16(0xFFFC))
         self.stack_pointer.write(0xFF)
+
+    def load_nes_file(self, filepath):
+        with open(filepath, "rb") as fp:
+            header = fp.read(16)
+            prg_rom_banks, _ = self.parse_ines_header(header)
+            self.load_prg_rom(fp, prg_rom_banks)
+
+    @staticmethod
+    def parse_ines_header(header):
+        if header[:4] != b"NES\x1a":
+            raise ValueError("Invalid NES ROM file.")
+
+        prg_rom_banks = header[4]
+        chr_rom_banks = header[5]
+
+        return prg_rom_banks, chr_rom_banks
+
+    def load_prg_rom(self, file, prg_rom_banks):
+        prg_rom_size = 16 * 1024 * prg_rom_banks  # 16 KB per bank
+        prg_rom_data = file.read(prg_rom_size)
+        prg_rom_data = np.frombuffer(prg_rom_data, dtype=np.uint8)
+
+        self.ram.write_chunk(0x8000, prg_rom_data)
+        if prg_rom_banks == 1:
+            # Mirror the data if only one PRG ROM bank
+            self.ram.write_chunk(0xC000, prg_rom_data)
+
+    def load_program(self, program: np.ndarray[np.uint8]):
+        self.ram.load_program(program)
 
     def stack_push(self, data: np.uint8):
         if self.stack_pointer.read() == np.uint8(0x00):
             raise MemoryError("Stack Overflow")
-        self.ram.write(np.uint16(0x100) + self.stack_pointer.read(), data)
+        self.ram.write(np.uint16(0x0100) + self.stack_pointer.read(), data)
+        self.stack_pointer.decrement()
+
+    def stack_push16(self, data: np.uint16):
+        if self.stack_pointer.read() == np.uint8(0x00):
+            raise MemoryError("Stack Overflow")
+        self.ram.write16(np.uint16(0xFF) + self.stack_pointer.read(), data)
+        self.stack_pointer.decrement()
         self.stack_pointer.decrement()
 
     def stack_pull(self) -> np.uint8:
         if self.stack_pointer.read() == np.uint8(0xFF):
             raise MemoryError("Stack Underflow")
-        data = self.ram.read(np.uint16(0x100) + self.stack_pointer.read())
+        data = self.ram.read(np.uint16(0x0101) + self.stack_pointer.read())
+        self.stack_pointer.increment()
+        return data
+
+    def stack_pull16(self) -> np.uint16:
+        if self.stack_pointer.read() == np.uint8(0xFF):
+            raise MemoryError("Stack Underflow")
+        data = self.ram.read16(np.uint16(0x101) + self.stack_pointer.read())
+        self.stack_pointer.increment()
         self.stack_pointer.increment()
         return data
 
@@ -130,6 +184,9 @@ class CPU:
 
             case 0x18:
                 self.clc()
+
+            case 0xD8:
+                self.cld()
 
             case 0x58:
                 self.cli()
@@ -221,7 +278,7 @@ class CPU:
                 self.jmp("indirect")
 
             case 0x20:
-                self.jsr("absolute")
+                self.jsr()
 
             case 0xA9:
                 self.lda("immediate")
@@ -274,7 +331,7 @@ class CPU:
                 self.lsr("absolute_x")
 
             case 0xEA:
-                self.nop()
+                self.nop("implied")
 
             case 0x09:
                 self.ora("immediate")
@@ -344,7 +401,7 @@ class CPU:
             case 0xFD:
                 self.sbc("absolute_x")
             case 0xF9:
-                self.sbc("absolute_Y")
+                self.sbc("absolute_y")
             case 0xE1:
                 self.sbc("indirect_x")
             case 0xF1:
@@ -406,8 +463,250 @@ class CPU:
             case 0x98:
                 self.tya()
 
+            # all opcodes below are illegal:
+            # https://www.nesdev.org/wiki/CPU_unofficial_opcodes
+            # https://www.masswerk.at/nowgobang/2021/6502-illegal-opcodes
+            # http://www.oxyron.de/html/opcodes02.html
+
+            case 0x4B:
+                self.alr("immediate")
+
+            case 0x0B:
+                self.anc("immediate")
+            case 0x2B:
+                self.anc("immediate")
+
+            case 0x8B:
+                self.xaa("immediate")
+
+            case 0x6B:
+                self.arr("immediate")
+
+            case 0xC7:
+                self.dcp("zero_page")
+            case 0xD7:
+                self.dcp("zero_page_x")
+            case 0xCF:
+                self.dcp("absolute")
+            case 0xDF:
+                self.dcp("absolute_x")
+            case 0xDB:
+                self.dcp("absolute_y")
+            case 0xC3:
+                self.dcp("indirect_x")
+            case 0xD3:
+                self.dcp("indirect_y")
+
+            case 0xE7:
+                self.isc("zero_page")
+            case 0xF7:
+                self.isc("zero_page_x")
+            case 0xEF:
+                self.isc("absolute")
+            case 0xFF:
+                self.isc("absolute_x")
+            case 0xFB:
+                self.isc("absolute_y")
+            case 0xE3:
+                self.isc("indirect_x")
+            case 0xF3:
+                self.isc("indirect_y")
+
+            case 0xBB:
+                self.las("absolute_y")
+
+            case 0xA7:
+                self.lax("zero_page")
+            case 0xB7:
+                self.lax("zero_page_y")
+            case 0xAF:
+                self.lax("absolute")
+            case 0xBF:
+                self.lax("absolute_y")
+            case 0xA3:
+                self.lax("indirect_x")
+            case 0xB3:
+                self.lax("indirect_y")
+
+            case 0xAB:
+                self.lxa("immediate")
+
+            case 0x27:
+                self.rla("zero_page")
+            case 0x37:
+                self.rla("zero_page_x")
+            case 0x2F:
+                self.rla("absolute")
+            case 0x3F:
+                self.rla("absolute_x")
+            case 0x3B:
+                self.rla("absolute_y")
+            case 0x23:
+                self.rla("indirect_x")
+            case 0x33:
+                self.rla("indirect_y")
+
+            case 0x67:
+                self.rra("zero_page")
+            case 0x77:
+                self.rra("zero_page_x")
+            case 0x6F:
+                self.rra("absolute")
+            case 0x7F:
+                self.rra("absolute_x")
+            case 0x7B:
+                self.rra("absolute_y")
+            case 0x63:
+                self.rra("indirect_x")
+            case 0x73:
+                self.rra("indirect_y")
+
+            case 0x87:
+                self.sax("zero_page")
+            case 0x97:
+                self.sax("zero_page_y")
+            case 0x8F:
+                self.sax("absolute")
+            case 0x83:
+                self.sax("indirect_x")
+
+            case 0xCB:
+                self.sbx("immediate")
+
+            case 0x9F:
+                self.sha("absolute_y")
+            case 0x93:
+                self.sha("indirect_y")
+
+            case 0x9E:
+                self.shx("absolute_y")
+
+            case 0x9C:
+                self.shy("absolute_x")
+
+            case 0x07:
+                self.slo("zero_page")
+            case 0x17:
+                self.slo("zero_page_x")
+            case 0x0F:
+                self.slo("absolute")
+            case 0x1F:
+                self.slo("absolute_x")
+            case 0x1B:
+                self.slo("absolute_y")
+            case 0x03:
+                self.slo("indirect_x")
+            case 0x13:
+                self.slo("indirect_y")
+
+            case 0x47:
+                self.sre("zero_page")
+            case 0x57:
+                self.sre("zero_page_x")
+            case 0x4F:
+                self.sre("absolute")
+            case 0x5F:
+                self.sre("absolute_x")
+            case 0x5B:
+                self.sre("absolute_y")
+            case 0x43:
+                self.sre("indirect_x")
+            case 0x53:
+                self.sre("indirect_y")
+
+            case 0x9B:
+                self.tas("immediate")
+
+            case 0xEB:
+                self.sbc("immediate")
+
+            case 0x1A:
+                self.nop("implied")
+            case 0x3A:
+                self.nop("implied")
+            case 0x5A:
+                self.nop("implied")
+            case 0x7A:
+                self.nop("implied")
+            case 0xDA:
+                self.nop("implied")
+            case 0xFA:
+                self.nop("implied")
+            case 0x80:
+                self.nop("immediate")
+            case 0x82:
+                self.nop("immediate")
+            case 0x89:
+                self.nop("immediate")
+            case 0xC2:
+                self.nop("immediate")
+            case 0xE2:
+                self.nop("immediate")
+            case 0x04:
+                self.nop("zero_page")
+            case 0x44:
+                self.nop("zero_page")
+            case 0x64:
+                self.nop("zero_page")
+            case 0x14:
+                self.nop("zero_page_x")
+            case 0x34:
+                self.nop("zero_page_x")
+            case 0x54:
+                self.nop("zero_page_x")
+            case 0x74:
+                self.nop("zero_page_x")
+            case 0xD4:
+                self.nop("zero_page_x")
+            case 0xF4:
+                self.nop("zero_page_x")
+            case 0x0C:
+                self.nop("absolute")
+            case 0x1C:
+                self.nop("absolute_x")
+            case 0x3C:
+                self.nop("absolute_x")
+            case 0x5C:
+                self.nop("absolute_x")
+            case 0x7C:
+                self.nop("absolute_x")
+            case 0xDC:
+                self.nop("absolute_x")
+            case 0xFC:
+                self.nop("absolute_x")
+
+            case 0x02:
+                self.jam()
+            case 0x12:
+                self.jam()
+            case 0x22:
+                self.jam()
+            case 0x32:
+                self.jam()
+            case 0x42:
+                self.jam()
+            case 0x52:
+                self.jam()
+            case 0x62:
+                self.jam()
+            case 0x72:
+                self.jam()
+            case 0x92:
+                self.jam()
+            case 0xB2:
+                self.jam()
+            case 0xD2:
+                self.jam()
+            case 0xF2:
+                self.jam()
+
+            case _:
+                raise ValueError(f"Invalid OpCode {hex(opcode)}")
+
     def load_operation_arg(self, addressing_mode):
         match addressing_mode:
+            case "implied":
+                return
             case "immediate":
                 self.program_counter.increment()
                 address = self.program_counter.read()
@@ -439,7 +738,7 @@ class CPU:
                 self.program_counter.increment()
                 address = (
                     self.ram.read16(self.program_counter.read())
-                    + self.register_x
+                    + self.register_x.read()
                 )
                 self.program_counter.increment()
                 return address
@@ -447,14 +746,15 @@ class CPU:
                 self.program_counter.increment()
                 address = (
                     self.ram.read16(self.program_counter.read())
-                    + self.register_x
+                    + self.register_y.read()
                 )
                 self.program_counter.increment()
                 return address
             case "indirect":
                 self.program_counter.increment()
                 reference = self.ram.read16(self.program_counter.read())
-                address = self.ram.read16(reference)
+                # bug in original 6502, we'll replicate it here
+                address = self.ram.read16(reference, page_wrap=True)
                 self.program_counter.increment()
                 return address
             case "indirect_x":
@@ -463,21 +763,29 @@ class CPU:
                     self.ram.read(self.program_counter.read())
                     + self.register_x.read()
                 )
-                address = self.ram.read16(reference)
+                address = self.ram.read16(reference, page_wrap=True)
                 return address
             case "indirect_y":
                 self.program_counter.increment()
                 reference = self.ram.read(self.program_counter.read())
-                address = self.ram.read16(reference) + self.register_y.read()
+                address = (
+                    self.ram.read16(reference, page_wrap=True)
+                    + self.register_y.read()
+                )
                 return address
             case _:
                 raise ValueError(f"Invalid addressing mode {addressing_mode}")
 
     def adc(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
-        result = self._add(self.accumulator.read(), data)
+        result, overflow = self._add(
+            self.accumulator.read(),
+            data,
+            np.uint8(self.status.carry_flag),
+        )
         self.accumulator.write(result)
 
+        self.status.carry_flag = bool(overflow)
         self._update_zero_and_neg_flags(result)
 
     def and_(self, mode):
@@ -493,12 +801,12 @@ class CPU:
             result = self._left_shift(data)
             self.accumulator.write(result)
         else:
-            data = self.ram.read(self.load_operation_arg(mode))
+            address = self.load_operation_arg(mode)
+            data = self.ram.read(address)
             result = self._left_shift(data)
-            self.ram.write(result)
+            self.ram.write(address, result)
 
-        self._update_zero_flag(self.accumulator.read())
-        self._update_neg_flag(result)
+        self._update_zero_and_neg_flags(result)
 
     def bcc(self):
         self._branch_if(not self.status.carry_flag)
@@ -531,6 +839,9 @@ class CPU:
         self._branch_if(not self.status.negative_flag)
 
     def brk(self):
+        # TODO:
+        # https://www.nesdev.org/the%20'B'%20flag%20&%20BRK%20instruction.txt
+        # https://www.nesdev.org/obelisk-6502-guide/reference.html#BRK
         self.status.break_command = True
 
     def bvc(self):
@@ -541,6 +852,9 @@ class CPU:
 
     def clc(self):
         self.status.carry_flag = False
+
+    def cld(self):
+        self.status.decimal_flag = False
 
     def cli(self):
         self.status.interrupt_flag = False
@@ -577,6 +891,7 @@ class CPU:
     def eor(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
         result = self.accumulator.read() ^ data
+        self.accumulator.write(result)
 
         self._update_zero_flag(self.accumulator.read())
         self._update_neg_flag(result)
@@ -600,16 +915,12 @@ class CPU:
 
     def jmp(self, mode):
         address = self.load_operation_arg(mode)
-        # TODO: An original 6502 does not correctly fetch the target address if
-        # the indirect vector falls on a page boundary (e.g. $xxFF where xx is
-        # any value from $00 to $FF). In this case fetches the LSB from $xxFF
-        # as expected but takes the MSB from $xx00.
-        self.program_counter = address
+        self.program_counter.write(address - np.uint16(1))
 
     def jsr(self):
         address = self.load_operation_arg("absolute")
-        self.stack_push(self.program_counter.read())
-        self.program_counter.write(address)
+        self.stack_push16(self.program_counter.read())
+        self.program_counter.write(address - np.uint16(1))
 
     def lda(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
@@ -635,19 +946,20 @@ class CPU:
             result = self._right_shift(data)
             self.accumulator.write(result)
         else:
-            data = self.ram.read(self.load_operation_arg(mode))
+            address = self.load_operation_arg(mode)
+            data = self.ram.read(address)
             result = self._right_shift(data)
-            self.ram.write(result)
+            self.ram.write(address, result)
 
-        self._update_zero_flag(self.accumulator.read())
-        self._update_neg_flag(result)
+        self._update_zero_and_neg_flags(result)
 
-    def nop(self):
-        ...
+    def nop(self, mode):
+        self.load_operation_arg(mode)
 
     def ora(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
         result = self.accumulator.read() | data
+        self.accumulator.write(result)
 
         self._update_zero_and_neg_flags(result)
 
@@ -655,7 +967,10 @@ class CPU:
         self.stack_push(self.accumulator.read())
 
     def php(self):
+        prev_flag = self.status.break_command
+        self.status.break_command = True
         self.stack_push(self.status.read())
+        self.status.break_command = prev_flag
 
     def pla(self):
         data = self.stack_pull()
@@ -673,9 +988,10 @@ class CPU:
             result = self._left_rotate(data)
             self.accumulator.write(result)
         else:
-            data = self.ram.read(self.load_operation_arg(mode))
+            address = self.load_operation_arg(mode)
+            data = self.ram.read(address)
             result = self._left_rotate(data)
-            self.ram.write(result)
+            self.ram.write(address, result)
 
         self._update_zero_flag(self.accumulator.read())
         self._update_neg_flag(result)
@@ -686,9 +1002,10 @@ class CPU:
             result = self._right_rotate(data)
             self.accumulator.write(result)
         else:
-            data = self.ram.read(self.load_operation_arg(mode))
+            address = self.load_operation_arg(mode)
+            data = self.ram.read(address)
             result = self._right_rotate(data)
-            self.ram.write(result)
+            self.ram.write(address, result)
 
         self._update_zero_flag(self.accumulator.read())
         self._update_neg_flag(result)
@@ -696,27 +1013,33 @@ class CPU:
     def rti(self):
         data = self.stack_pull()
         self.status.write(data)
-        address = self.stack_pull()
-        self.program_counter.write(address)
+        address = self.stack_pull16()
+        self.program_counter.write(address - np.uint16(1))
 
     def rts(self):
-        address = self.stack_pull()
+        address = self.stack_pull16()
         self.program_counter.write(address)
 
     def sbc(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
-        twos_comp_data = np.uint8(int(np.binary_repr(data, width=8), base=2))
-        result = self._add(self.accumulator.read(), twos_comp_data)
+        twos_comp_data = ~data + np.uint8(1)
+        not_carry = np.uint8(not self.status.carry_flag)
+        twos_comp_not_carry = ~not_carry + np.uint8(1)
+        result, overflow = self._add(
+            self.accumulator.read(),
+            twos_comp_data,
+            twos_comp_not_carry,
+        )
         self.accumulator.write(result)
 
+        self.status.carry_flag = overflow
         self._update_zero_and_neg_flags(result)
 
     def sec(self):
         self.status.carry_flag = True
 
     def sed(self):
-        # decimal operation, it doesn't work in 2A03
-        ...
+        self.status.decimal_flag = True
 
     def sei(self):
         self.status.interrupt_flag = True
@@ -761,13 +1084,137 @@ class CPU:
         data = self.register_x.read()
         self.stack_pointer.write(data)
 
-        self._update_zero_and_neg_flags(data)
-
     def tya(self):
         data = self.register_y.read()
         self.accumulator.write(data)
 
         self._update_zero_and_neg_flags(data)
+
+    # illegal opcodes
+
+    def dcp(self, mode):
+        # DEC
+        address = self.load_operation_arg(mode)
+        data = self.ram.read(address) - np.uint8(1)
+        self.ram.write(address, data)
+
+        self._update_zero_and_neg_flags(data)
+
+        # CMP
+        a_data = self.accumulator.read()
+        result = a_data - data
+
+        self.status.carry_flag = a_data >= data
+        self._update_zero_and_neg_flags(result)
+
+    def isc(self, mode):
+        # INC
+        address = self.load_operation_arg(mode)
+        data = self.ram.read(address) + np.uint8(1)
+        self.ram.write(address, data)
+
+        # self._update_zero_and_neg_flags(data)
+
+        # ISC
+        twos_comp_data = ~data + np.uint8(1)
+        not_carry = np.uint8(not self.status.carry_flag)
+        twos_comp_not_carry = ~not_carry + np.uint8(1)
+        result, overflow = self._add(
+            self.accumulator.read(),
+            twos_comp_data,
+            twos_comp_not_carry,
+        )
+        self.accumulator.write(result)
+
+        self.status.carry_flag = overflow
+        self._update_zero_and_neg_flags(result)
+
+    def lax(self, mode):
+        # LDA
+        data = self.ram.read(self.load_operation_arg(mode))
+        self.accumulator.write(data)
+
+        self._update_zero_and_neg_flags(data)
+
+        # LDX
+        self.register_x.write(data)
+
+        self._update_zero_and_neg_flags(data)
+
+    def rla(self, mode):
+        # ROL
+        address = self.load_operation_arg(mode)
+        data = self.ram.read(address)
+        result = self._left_rotate(data)
+        self.ram.write(address, result)
+
+        self._update_zero_flag(self.accumulator.read())
+        self._update_neg_flag(result)
+
+        # AND
+        result = self.accumulator.read() & result
+        self.accumulator.write(result)
+
+        self._update_zero_and_neg_flags(result)
+
+    def rra(self, mode):
+        # ROR
+        address = self.load_operation_arg(mode)
+        data = self.ram.read(address)
+        result = self._right_rotate(data)
+        self.ram.write(address, result)
+
+        self._update_zero_flag(self.accumulator.read())
+        self._update_neg_flag(result)
+
+        # ADC
+        result, overflow = self._add(
+            self.accumulator.read(),
+            result,
+            np.uint8(self.status.carry_flag),
+        )
+        self.accumulator.write(result)
+
+        self.status.carry_flag = bool(overflow)
+        self._update_zero_and_neg_flags(result)
+
+    def sax(self, mode):
+        address = self.load_operation_arg(mode)
+        data = self.accumulator.read() & self.register_x.read()
+        self.ram.write(address, data)
+
+    def slo(self, mode):
+        # ASL
+        address = self.load_operation_arg(mode)
+        data = self.ram.read(address)
+        result = self._left_shift(data)
+        self.ram.write(address, result)
+
+        self._update_zero_and_neg_flags(result)
+
+        # ORA
+        result = self.accumulator.read() | result
+        self.accumulator.write(result)
+
+        self._update_zero_and_neg_flags(result)
+
+    def sre(self, mode):
+        # LSR
+        address = self.load_operation_arg(mode)
+        data = self.ram.read(address)
+        result = self._right_shift(data)
+        self.ram.write(address, result)
+
+        self._update_zero_and_neg_flags(result)
+
+        # EOR
+        result = self.accumulator.read() ^ result
+        self.accumulator.write(result)
+
+        self._update_zero_flag(self.accumulator.read())
+        self._update_neg_flag(result)
+
+    # end of illegal opcodes
 
     def _update_zero_and_neg_flags(self, data):
         self._update_zero_flag(data)
@@ -788,53 +1235,54 @@ class CPU:
     def _is_zero(data):
         return not data
 
-    def _add(self, arg1, arg2):
-        result = sum([arg1, arg2])
+    def _add(self, arg1, arg2, carry):
+        result = sum([arg1, arg2, carry])
+        is_result_neg = self._is_negative(np.uint8(result % 256))
+        # complicated edge case, don't ask
         self.status.overflow_flag = (
-            self._is_negative(arg1)
-            and self._is_negative(arg2)
-            and self._is_negative(result)
-        ) or (
-            not self._is_negative(arg1)
-            and not self._is_negative(arg2)
-            and not self._is_negative(result)
-        )
-        self.status.carry_flag = bool(result // 256)
-        return np.uint8(result % 256)
+            bool(arg2) & (~(self._is_negative(arg1) ^ self._is_negative(arg2)))
+            | ~arg2
+            & ~(self._is_negative(arg1) ^ self._is_negative(arg2 + carry))
+        ) & (self._is_negative(arg1) ^ is_result_neg)
+        result8 = np.uint8(result % 256)
+        return result8, bool(result // 256)
 
     def _left_shift(self, data):
-        result = data << 8
+        result = data << 1
         self.status.carry_flag = self._is_negative(data)
         return np.uint8(result % 256)
 
     def _branch_if(self, condition):
-        data = self.ram.read(self.load_operation_arg("relative"))
-        offset = data.astype(np.int8)
+        # not quite true, addressing mode should be `relative`
+        # but let's keep things simple
+        data = self.ram.read(self.load_operation_arg("immediate"))
         if condition:
-            self.program_counter += offset
+            offset = data.astype(np.int8)
+            self.program_counter.write(self.program_counter.read() + offset)
 
     def _compare(self, register, mode):
         data = self.ram.read(self.load_operation_arg(mode))
-        result = register.read() - data
+        reg_data = register.read()
+        result = reg_data - data
 
-        self.status.carry_flag = result >= 0
+        self.status.carry_flag = reg_data >= data
         self._update_zero_and_neg_flags(result)
 
     def _right_shift(self, data):
-        result = data >> 8
-        self.status.carry_flag = not (data % 2)
+        result = data >> 1
+        self.status.carry_flag = data % 2
         return np.uint8(result % 256)
 
     def _left_rotate(self, data):
-        result = data << 8
+        result = data << 1
         result = self._copy_bit(result, 0, int(self.status.carry_flag))
         self.status.carry_flag = self._is_negative(data)
         return result
 
     def _right_rotate(self, data):
-        result = data >> 8
+        result = data >> 1
         result = self._copy_bit(result, 7, int(self.status.carry_flag))
-        self.status.carry_flag = not (data % 2)
+        self.status.carry_flag = data % 2
         return result
 
     @staticmethod
@@ -844,6 +1292,10 @@ class CPU:
         data ^= (not value) * mask
         return np.uint8(data)
 
+    def _check_stack(self):
+        # debugging purposes
+        return self.ram.data[0x100 + self.stack_pointer.read() + 1 : 0x200]
+
 
 class Register:
     def __init__(self, dtype=np.uint8):
@@ -851,7 +1303,7 @@ class Register:
         self.data = dtype(0)
 
     def read(self) -> np.uint8 | np.uint16:
-        return self.value.copy()
+        return self.data.copy()
 
     def write(self, data: np.uint8 | np.uint16):
         self.data = self.dtype(data)
@@ -872,7 +1324,9 @@ class Status:
     def reset(self):
         self.carry_flag = False
         self.zero_flag = False
-        self.interrupt_flag = False
+        self.interrupt_flag = True
+        self.decimal_flag = False
+        # I'm not sure of this, see comment in CPU.brk()
         self.break_command = False
         self.overflow_flag = False
         self.negative_flag = False
@@ -884,7 +1338,7 @@ class Status:
                 self.carry_flag,
                 self.zero_flag,
                 self.interrupt_flag,
-                False,  # decimal flag
+                self.decimal_flag,  # doesn't really matter
                 self.break_command,
                 True,  # i don't think this is a valid flag in any context
                 self.overflow_flag,
@@ -901,6 +1355,7 @@ class Status:
         self.carry_flag = bin_data[-1] == "1"
         self.zero_flag = bin_data[-2] == "1"
         self.interrupt_flag = bin_data[-3] == "1"
+        self.decimal_flag = bin_data[-4] == "1"
         self.break_command = bin_data[-5] == "1"
         self.overflow_flag = bin_data[-7] == "1"
         self.negative_flag = bin_data[-8] == "1"
@@ -908,23 +1363,101 @@ class Status:
 
 class RAM:
     def __init__(self):
-        self.data = np.zeros((0xFFFF,), dtype=np.uint8)
+        self.data = np.zeros((0x10000,), dtype=np.uint8)
 
-    def load_program(self, program):
-        self.write(0x8000, program, len(program))
+    def load_program(self, program: np.ndarray[np.uint8]):
+        self.write_chunk(0x8000, program)
 
     def read(self, address):
         return self.data[address].copy()
 
-    def read16(self, address):
-        lo, hi = self.data[address : address + 1]
-        return (hi.astype(np.uint16) << 8) + lo.astype(np.uint16)
+    def read16(self, address, page_wrap=False):
+        address = np.uint16(address)
+        if page_wrap and np.uint8(address) == 0xFF:
+            page = np.uint8(address >> 8)
+            lo = self.data[self._uint16_from_2bytes(np.uint8(0xFF), page)]
+            hi = self.data[self._uint16_from_2bytes(np.uint8(0x00), page)]
+        else:
+            lo, hi = self.data[address : address + 2]
+        return self._uint16_from_2bytes(lo, hi)
+
+    def write_chunk(self, address, data):
+        self.data[address : address + data.shape[0]] = data
 
     def write(self, address, data):
         self.data[address] = data
 
     def write16(self, address, data):
+        data = np.uint16(data)
         lo = (data & 0xFF).astype(np.uint8)
         hi = ((data >> 8) & 0xFF).astype(np.uint8)
         self.data[address] = lo
         self.data[address + 1] = hi
+
+    @staticmethod
+    def _uint16_from_2bytes(lo, hi):
+        return np.uint16((hi.astype(np.uint16) << 8) + lo.astype(np.uint16))
+
+
+if __name__ == "__main__":
+    import re
+
+    def hex_format(data, n_bytes=1):
+        hex_repr = np.base_repr(data, 16)
+        return "0" * (2 * n_bytes - len(hex_repr)) + hex_repr
+
+    def print_binaries(d1, d2):
+        # to debug process status register, d1 is str (p variable), d2 is int
+        d1 = bin(int(d1, 16))[2:]
+        print("0" * (8 - len(d1)) + d1)
+        d2 = bin(d2)[2:]
+        print("0" * (8 - len(d2)) + d2)
+
+    with open("logs/nestest.log") as fp:
+        test_lines = fp.readlines()
+
+    test = [
+        {
+            "addr": x[:4],
+            # "op": re.search(r"  ([0-9A-F]{2})", x).group(1),
+            "A": re.search(r"A:([0-9A-F]{2}) ", x).group(1),
+            "X": re.search(r"X:([0-9A-F]{2}) ", x).group(1),
+            "Y": re.search(r"Y:([0-9A-F]{2}) ", x).group(1),
+            "P": re.search(r"P:([0-9A-F]{2}) ", x).group(1),
+            "SP": re.search(r"SP:([0-9A-F]{2}) ", x).group(1),
+        }
+        for x in test_lines
+    ]
+
+    cpu = CPU(log="nestest")
+    cpu.load_nes_file("nestest.nes")
+    cpu.reset()
+    cpu.program_counter.write(0xC000)
+
+    # TODO: I don't know why but the SP starts at 0xFD for this ROM
+    cpu.stack_push16(0x0000)
+
+    log_str = "{addr}  A:{A} X:{X} Y:{Y} P:{P} SP:{SP}\n"
+
+    i = 0
+    while True:
+        pc = hex_format(cpu.program_counter.read(), n_bytes=2)
+        a = hex_format(cpu.accumulator.read())
+        x = hex_format(cpu.register_x.read())
+        y = hex_format(cpu.register_y.read())
+        p = hex_format(cpu.status.read())
+        sp = hex_format(cpu.stack_pointer.read())
+        info_dict = {"addr": pc, "A": a, "X": x, "Y": y, "P": p, "SP": sp}
+
+        cpu.log_file.write(log_str.format(**info_dict))
+        if info_dict != test[i]:
+            break
+        opcode = cpu.ram.read(cpu.program_counter.read())
+        cpu.operation(opcode)
+        # TODO: copy this line to main_loop if this behavior is correct
+        cpu.status.break_command = False
+        cpu.program_counter.increment()
+        i += 1
+
+    cpu.log_file.close()
+    print(f"Lines executed: {i}/{len(test)} ({i/len(test):.1%})")
