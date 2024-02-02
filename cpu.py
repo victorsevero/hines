@@ -1376,6 +1376,9 @@ class RAM:
     def load_program(self, program: np.ndarray[np.uint8]):
         self.write_chunk(0x8000, program)
 
+    def read_chunk(self, address, size):
+        return self.data[address : address + size].copy()
+
     def read(self, address):
         return self.data[address].copy()
 

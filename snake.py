@@ -26,6 +26,7 @@ display = pygame.display.set_mode(
     (SCALE_FACTOR * SCREEN_SIZE, SCALE_FACTOR * SCREEN_SIZE)
 )
 pygame.display.set_caption("6502 Snake Game")
+prev_screen = None
 
 
 class FPS:
@@ -47,7 +48,7 @@ class FPS:
         display.blit(self.text, (10, 10))
 
 
-# fps = FPS()
+fps = FPS()
 
 
 def read_snake_data():
@@ -59,6 +60,7 @@ def read_snake_data():
 
 
 def callback(cpu: CPU):
+    global prev_screen
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             exit()
@@ -71,6 +73,11 @@ def callback(cpu: CPU):
                 cpu.ram.write(0xFF, 0x61)
             elif event.key == pygame.K_RIGHT:
                 cpu.ram.write(0xFF, 0x64)
+
+    screen = cpu.ram.read_chunk(SCREEN_ADDRESS, SCREEN_SIZE**2)
+    if np.array_equal(screen, prev_screen):
+        prev_screen = screen
+        return
 
     display.fill(BG_COLOR)
     # it would be more efficient if we checked for snake body parts and food
@@ -108,10 +115,11 @@ def callback(cpu: CPU):
                 ],
             )
 
-    # fps.render(display)
+    prev_screen = screen
+    fps.render(display)
     if update:
         pygame.display.update()
-    # fps.clock.tick()
+    fps.clock.tick()
 
 
 def screen_dump(cpu: CPU):
