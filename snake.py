@@ -47,7 +47,7 @@ class FPS:
         display.blit(self.text, (10, 10))
 
 
-fps = FPS()
+# fps = FPS()
 
 
 def read_snake_data():
@@ -87,7 +87,15 @@ def callback(cpu: CPU):
                 color = SNAKE_COLOR
             case _:
                 color = FOOD_COLOR
-        if display.get_at((x, y))[:3] != color:
+        if (
+            display.get_at(
+                (
+                    SCALE_FACTOR * x + SCALE_FACTOR // 2,
+                    SCALE_FACTOR * y + SCALE_FACTOR // 2,
+                )
+            )[:3]
+            != color
+        ):
             update = True
             pygame.draw.rect(
                 display,
@@ -100,10 +108,10 @@ def callback(cpu: CPU):
                 ],
             )
 
-    fps.render(display)
+    # fps.render(display)
     if update:
         pygame.display.update()
-    fps.clock.tick()
+    # fps.clock.tick()
 
 
 def screen_dump(cpu: CPU):
@@ -132,7 +140,6 @@ def run():
             cpu.log_file.write(f"{curr_pc}\n")
         opcode = cpu.ram.read(cpu.program_counter.read())
         cpu.operation(opcode)
-        cpu.program_counter.increment()
         if cpu.program_counter.read() == 0x735:
             game_over = True
     cpu.log_file.close()

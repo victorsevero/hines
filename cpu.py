@@ -36,7 +36,6 @@ class CPU:
                 self.log_file.write(f"{curr_pc}\n")
             opcode = self.ram.read(self.program_counter.read())
             self.operation(opcode)
-            self.program_counter.increment()
 
     def reset(self):
         self.accumulator.write(0)
@@ -703,6 +702,9 @@ class CPU:
             case _:
                 raise ValueError(f"Invalid OpCode {hex(opcode)}")
 
+        self.status.break_command = False
+        self.program_counter.increment()
+
     def load_operation_arg(self, addressing_mode):
         match addressing_mode:
             case "implied":
@@ -778,14 +780,11 @@ class CPU:
 
     def adc(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
-        result, overflow = self._add(
-            self.accumulator.read(),
-            data,
-            np.uint8(self.status.carry_flag),
-        )
+        result, carry_out, overflow = self._add(data)
         self.accumulator.write(result)
 
-        self.status.carry_flag = bool(overflow)
+        self.status.carry_flag = carry_out
+        self.status.overflow_flag = overflow
         self._update_zero_and_neg_flags(result)
 
     def and_(self, mode):
@@ -1022,17 +1021,11 @@ class CPU:
 
     def sbc(self, mode):
         data = self.ram.read(self.load_operation_arg(mode))
-        twos_comp_data = ~data + np.uint8(1)
-        not_carry = np.uint8(not self.status.carry_flag)
-        twos_comp_not_carry = ~not_carry + np.uint8(1)
-        result, overflow = self._add(
-            self.accumulator.read(),
-            twos_comp_data,
-            twos_comp_not_carry,
-        )
+        result, borrow_out, overflow = self._add(data, subtract=True)
         self.accumulator.write(result)
 
-        self.status.carry_flag = overflow
+        self.status.carry_flag = borrow_out
+        self.status.overflow_flag = overflow
         self._update_zero_and_neg_flags(result)
 
     def sec(self):
@@ -1113,20 +1106,14 @@ class CPU:
         data = self.ram.read(address) + np.uint8(1)
         self.ram.write(address, data)
 
-        # self._update_zero_and_neg_flags(data)
+        self._update_zero_and_neg_flags(data)
 
-        # ISC
-        twos_comp_data = ~data + np.uint8(1)
-        not_carry = np.uint8(not self.status.carry_flag)
-        twos_comp_not_carry = ~not_carry + np.uint8(1)
-        result, overflow = self._add(
-            self.accumulator.read(),
-            twos_comp_data,
-            twos_comp_not_carry,
-        )
+        # SBC
+        result, borrow_out, overflow = self._add(data, subtract=True)
         self.accumulator.write(result)
 
-        self.status.carry_flag = overflow
+        self.status.carry_flag = borrow_out
+        self.status.overflow_flag = overflow
         self._update_zero_and_neg_flags(result)
 
     def lax(self, mode):
@@ -1168,14 +1155,11 @@ class CPU:
         self._update_neg_flag(result)
 
         # ADC
-        result, overflow = self._add(
-            self.accumulator.read(),
-            result,
-            np.uint8(self.status.carry_flag),
-        )
+        result, carry_out, overflow = self._add(result)
         self.accumulator.write(result)
 
-        self.status.carry_flag = bool(overflow)
+        self.status.carry_flag = carry_out
+        self.status.overflow_flag = overflow
         self._update_zero_and_neg_flags(result)
 
     def sax(self, mode):
@@ -1235,17 +1219,41 @@ class CPU:
     def _is_zero(data):
         return not data
 
-    def _add(self, arg1, arg2, carry):
-        result = sum([arg1, arg2, carry])
-        is_result_neg = self._is_negative(np.uint8(result % 256))
-        # complicated edge case, don't ask
-        self.status.overflow_flag = (
-            bool(arg2) & (~(self._is_negative(arg1) ^ self._is_negative(arg2)))
-            | ~arg2
-            & ~(self._is_negative(arg1) ^ self._is_negative(arg2 + carry))
-        ) & (self._is_negative(arg1) ^ is_result_neg)
-        result8 = np.uint8(result % 256)
-        return result8, bool(result // 256)
+    # def _add(self, arg1, arg2, carry):
+    #     result = np.uint16(arg1) + np.uint16(arg2) + np.uint16(carry)
+    #     result8 = np.uint8(result % 256)
+    #     self.status.overflow_flag = not ((arg1 ^ arg2) & 0x80) and bool(
+    #         (arg1 ^ result8) & 0x80
+    #     )
+    #     # self.status.overflow_flag = (
+    #     #     (self._is_negative(arg1) != self._is_negative(arg2))
+    #     # ) or (self._is_negative(arg1) != self._is_negative(result8))
+    #     return result8, bool(result // 256)
+
+    def _add(self, data, subtract=False):
+        arg1 = self.accumulator.read().astype(np.uint16)
+        if subtract:
+            # arg2 = (~data + np.uint8(1)).astype(np.uint16)
+            # carry = np.uint8(1 - self.status.carry_flag)
+            # carry = (~carry + np.uint8(1)).astype(np.uint16)
+            arg2 = (~data).astype(np.uint16)
+            carry = np.uint16(self.status.carry_flag)
+
+        else:
+            arg2 = data.astype(np.uint16)
+            carry = np.uint16(self.status.carry_flag)
+
+        result = arg1 + arg2 + carry
+        carry = result > 0xFF
+        arg1 = arg1.astype(np.uint8)
+        arg2 = arg2.astype(np.uint8)
+        result = result.astype(np.uint8)
+        overflow = ((arg1 ^ result) & (arg2 ^ result) & 0x80) != 0
+        # overflow = (self._is_negative(arg1) != self._is_negative(result)) and (
+        #     self._is_negative(arg2) != self._is_negative(result)
+        # )
+
+        return result, carry, overflow
 
     def _left_shift(self, data):
         result = data << 1
@@ -1439,8 +1447,7 @@ if __name__ == "__main__":
 
     log_str = "{addr}  A:{A} X:{X} Y:{Y} P:{P} SP:{SP}\n"
 
-    i = 0
-    while True:
+    for i in range(len(test)):
         pc = hex_format(cpu.program_counter.read(), n_bytes=2)
         a = hex_format(cpu.accumulator.read())
         x = hex_format(cpu.register_x.read())
@@ -1454,10 +1461,6 @@ if __name__ == "__main__":
             break
         opcode = cpu.ram.read(cpu.program_counter.read())
         cpu.operation(opcode)
-        # TODO: copy this line to main_loop if this behavior is correct
-        cpu.status.break_command = False
-        cpu.program_counter.increment()
-        i += 1
 
     cpu.log_file.close()
-    print(f"Lines executed: {i}/{len(test)} ({i/len(test):.1%})")
+    print(f"Lines executed: {i}/{(len(test)-1)} ({i/(len(test)-1):.1%})")
