@@ -1,5 +1,4 @@
 import struct
-import time
 
 import numpy as np
 import pygame
@@ -66,15 +65,15 @@ def callback(cpu: CPU):
             exit()
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_UP:
-                cpu.ram.write(0xFF, 0x77)
+                cpu.bus.write(0xFF, 0x77)
             elif event.key == pygame.K_DOWN:
-                cpu.ram.write(0xFF, 0x73)
+                cpu.bus.write(0xFF, 0x73)
             elif event.key == pygame.K_LEFT:
-                cpu.ram.write(0xFF, 0x61)
+                cpu.bus.write(0xFF, 0x61)
             elif event.key == pygame.K_RIGHT:
-                cpu.ram.write(0xFF, 0x64)
+                cpu.bus.write(0xFF, 0x64)
 
-    screen = cpu.ram.read_chunk(SCREEN_ADDRESS, SCREEN_SIZE**2)
+    screen = cpu.bus.read_chunk(SCREEN_ADDRESS, SCREEN_SIZE**2)
     if np.array_equal(screen, prev_screen):
         prev_screen = screen
         return
@@ -86,7 +85,7 @@ def callback(cpu: CPU):
     for address in range(SCREEN_ADDRESS, SCREEN_ADDRESS + SCREEN_SIZE**2):
         x = (address - SCREEN_ADDRESS) % SCREEN_SIZE
         y = (address - SCREEN_ADDRESS) // SCREEN_SIZE
-        pixel_ram_value = cpu.ram.read(address)
+        pixel_ram_value = cpu.bus.read(address)
         match pixel_ram_value:
             case 0x00:
                 color = BG_COLOR
@@ -123,34 +122,26 @@ def callback(cpu: CPU):
 
 
 def screen_dump(cpu: CPU):
-    data = cpu.ram.data[SCREEN_ADDRESS : SCREEN_ADDRESS + SCREEN_SIZE**2]
+    data = cpu.bus.data[SCREEN_ADDRESS : SCREEN_ADDRESS + SCREEN_SIZE**2]
     data = data.reshape(32, 32)
     np.savetxt("screen.csv", data, fmt="%d", delimiter=",")
 
 
 def run():
-    log = "snake"
-    cpu = CPU(log=log)
-
-    # custom load_program because of different entry point
-    cpu.ram.write_chunk(0x0600, read_snake_data())
-    cpu.ram.write16(0xFFFC, 0x0600)
-
+    cpu = CPU()
+    cpu.load_rom("snake.nes")
+    # cpu.bus.write16(0xFFFC, 0x0600)
     cpu.reset()
 
     game_over = False
     rng = np.random.default_rng()
     while not game_over:
-        cpu.ram.write(0xFE, rng.integers(low=0, high=255, dtype=np.uint8))
+        cpu.bus.write(0xFE, rng.integers(low=0, high=255, dtype=np.uint8))
         callback(cpu)
-        if log:
-            curr_pc = np.base_repr(cpu.program_counter.read(), 16, 3)[2:]
-            cpu.log_file.write(f"{curr_pc}\n")
-        opcode = cpu.ram.read(cpu.program_counter.read())
+        opcode = cpu.bus.read(cpu.program_counter.read())
         cpu.operation(opcode)
         if cpu.program_counter.read() == 0x735:
             game_over = True
-    cpu.log_file.close()
 
 
 if __name__ == "__main__":
